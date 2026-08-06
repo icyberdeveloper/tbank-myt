@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Захваты трафика — это чужие рабочие данные: имена, почты, темы встреч коллег,
+# а в теле авторизации ещё и пароль с SMS-кодом. Никогда не коммитить.
+captures*.xml
+captures*.jsonl
+
+# Файл сессии: живой accessToken + refreshToken. По умолчанию лежит в
+# ~/.local/share/tbank-myt/, но MYT_SESSION умеет положить его сюда — якорь на
+# корень, чтобы не выкинуть заодно tests/fixtures/myt.json.
+/session.json
+/myt.json
+
+# Рантайм-логи: MYT_TRACE_FILE / MYT_EVENTS тоже перенастраиваются сюда.
+calls.jsonl
+events.jsonl
+
+# Собирается на старте из системных CA + приколотого корня.
+ca/bundle.pem

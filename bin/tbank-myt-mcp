@@ -1,0 +1,13 @@
+#!/bin/sh
+# Запуск MCP: поднимает .venv при первом старте, дальше идёт сразу к серверу.
+# Весь вывод бутстрапа — в stderr: stdout занят протоколом MCP.
+set -e
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PY="$DIR/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  echo "[myt] создаю окружение…" >&2
+  python3 -m venv "$DIR/.venv" >&2
+  "$DIR/.venv/bin/pip" install -q -e "$DIR" >&2
+fi
+cd "$DIR"
+exec "$PY" -m src.server

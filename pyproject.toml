@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tbank-myt-mcp"
+version = "0.1.0"
+description = "MCP для MyT — рабочего календаря и офисной парковки Т-Банка"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+dependencies = [
+  # 1.x: FastMCP живёт в mcp.server.fastmcp. В 2.0 этого модуля нет.
+  "mcp>=1.2,<2",
+  "requests>=2.32",
+]
+
+[project.scripts]
+tbank-myt-mcp = "src.server:main"
+
+[tool.setuptools]
+packages = ["src", "ca.roots"]
+
+[tool.setuptools.package-data]
+"ca.roots" = ["*.pem"]
