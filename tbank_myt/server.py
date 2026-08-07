@@ -321,6 +321,10 @@ _MYT_FILE = os.environ.get(
     os.path.expanduser("~/.local/share/tbank-myt/session.json"),
 )
 _myt_session: myt.MytSession | None = None
+# mtime файла, из которого собрана сессия в памяти. Нужен, потому что сервер живёт
+# часами, а login_cli.py — отдельный процесс: без этого перелогин не доходил до
+# работающего MCP вовсе.
+_myt_session_mtime: float | None = None
 
 
 def _save_myt(s) -> None:
@@ -331,8 +335,11 @@ def _save_myt(s) -> None:
     ротация токена видна только на следующем запуске, уже как мёртвая сессия,
     поэтому исключение уходит вызывающему, а MytSession._persist его запоминает и
     тулы о нём говорят вслух."""
+    global _myt_session_mtime
     d = {k: v for k, v in s.__dict__.items() if not k.startswith("_") or k == "_minted_at"}
     _write_json_0600(_MYT_FILE, d, "myt session")
+    # Своя же запись не должна выглядеть как чужой перелогин.
+    _myt_session_mtime = _mtime_or_none(_MYT_FILE)
 
 
 def _load_myt():
@@ -349,10 +356,36 @@ def _load_myt():
         return None
 
 
+def _mtime_or_none(path: str):
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return None
+
+
 def _require_myt():
-    global _myt_session
-    if _myt_session is None:
-        _myt_session = _load_myt()
+    """Сессия из памяти — но НЕ старше файла на диске.
+
+    Сервер живёт часами, а вход делается другим процессом: тул говорит «сессия
+    мертва, запусти tbank-myt-login», человек запускает, файл переписывается — и
+    тул говорит ровно то же самое, потому что держит в памяти протухшую копию.
+    Тупик, в котором совет тула не работает и никуда не ведёт; выход был только
+    один — перезапустить сервер, о чём нигде не сказано. Замечено на живой
+    сессии, а не придумано.
+
+    Поэтому перед каждым вызовом сверяем mtime: файл новее нашей копии — читаем
+    заново. Один stat на вызов; сеть тут дороже на три порядка.
+    """
+    global _myt_session, _myt_session_mtime
+    disk = _mtime_or_none(_MYT_FILE)
+    if _myt_session is None or (disk is not None and disk != _myt_session_mtime):
+        fresh = _load_myt()
+        # Нечитаемый файл не должен ронять живую сессию из памяти: она рабочая, а
+        # он мог не дописаться. А вот успешное чтение заменяет её всегда — даже
+        # если наша копия ещё жива: на диске лежит то, что человек положил позже.
+        if fresh is not None or _myt_session is None:
+            _myt_session = fresh
+            _myt_session_mtime = disk
         if _myt_session is not None:
             _myt_session._on_persist = lambda: _save_myt(_myt_session)
     if not _myt_session or not _myt_session.alive:

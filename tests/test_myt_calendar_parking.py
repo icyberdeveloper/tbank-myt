@@ -22,6 +22,7 @@
 """
 import json
 import os
+import shutil
 import sys
 from datetime import timedelta
 
@@ -390,6 +391,9 @@ def check_dates_accept_russian_words():
 
 def with_session(s):
     server._myt_session = s
+    # _require_myt перечитывает сессию, когда файл на диске новее нашей копии.
+    # Подсунутую сессию это иначе стирало бы у тестов, которые файл создают.
+    server._myt_session_mtime = server._mtime_or_none(server._MYT_FILE)
     return s
 
 
@@ -426,6 +430,60 @@ def _booking(day, place_id=78984, pos="219"):
     return {"date": day, "parkingPlaceId": place_id, "position": pos,
             "floorName": "-2", "buildingName": "Офис, Низкая Башня",
             "carNumber": "A000AA000", "carModel": "Марка"}
+
+
+def check_relogin_reaches_a_running_server():
+    """Перелогин ДРУГИМ процессом должен доходить до живого MCP-сервера.
+
+    Замечено на живой сессии. Сервер держал сессию в памяти с момента запуска,
+    она умерла, и тул честно сказал: «нужен полный вход, запусти login_cli».
+    Человек запустил, файл сессии переписался — а тул повторил ровно тот же
+    ответ, потому что в память не заглядывал никто. Совет тула не работал, и
+    единственный выход — перезапуск сервера — нигде не назван. Тупик хуже
+    ошибки: ошибку видно, а тут всё выглядит исправным.
+    """
+    tmp = _tempfile.mkdtemp()
+    saved_file, saved_sess = server._MYT_FILE, server._myt_session
+    saved_mtime = server._myt_session_mtime
+    server._MYT_FILE = os.path.join(tmp, "session.json")
+    try:
+        def write(token, when):
+            with open(server._MYT_FILE, "w", encoding="utf-8") as fh:
+                json.dump({"access_token": token, "refresh_token": "r",
+                           "username": "employee", "user_id": "u",
+                           "_minted_at": 2 ** 31}, fh)
+            os.utime(server._MYT_FILE, (when, when))
+
+        server._myt_session, server._myt_session_mtime = None, None
+        write("token-A", 1_000_000)
+        check(server._require_myt().access_token == "token-A", "первая загрузка — с диска")
+
+        # Перелогин: файл переписан ПОЗЖЕ и другим процессом.
+        write("token-B", 2_000_000)
+        got = server._require_myt().access_token
+        check(got == "token-B",
+              f"после перелогина сервер обязан взять новую сессию, а взял {got!r}")
+
+        # А своя же запись перечитыванием считаться не должна: иначе каждое
+        # продление токена гоняло бы файл туда-обратно.
+        s = server._require_myt()
+        s.access_token = "token-C"
+        server._save_myt(s)
+        check(server._require_myt().access_token == "token-C",
+              "после собственного сохранения в памяти должна остаться своя сессия")
+
+        # Нечитаемый файл не должен ронять рабочую сессию: она живая, а он мог
+        # не дописаться.
+        with open(server._MYT_FILE, "w", encoding="utf-8") as fh:
+            fh.write("{битый json")
+        os.utime(server._MYT_FILE, (3_000_000, 3_000_000))
+        check(server._require_myt().access_token == "token-C",
+              "битый файл не должен отбирать живую сессию из памяти")
+        print("  перелогин доходит до работающего сервера, своя запись не сбивает")
+    finally:
+        server._MYT_FILE = saved_file
+        server._myt_session, server._myt_session_mtime = saved_sess, saved_mtime
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def check_parking_cancel_request_matches_capture():
@@ -1227,6 +1285,7 @@ def main():
                check_today_means_moscow_not_the_host,
                check_dates_accept_russian_words,
                check_cancel_reports_that_nothing_changed,
+               check_relogin_reaches_a_running_server,
                check_parking_cancel_request_matches_capture,
                check_parking_cancel_does_not_believe_an_empty_200,
                check_parking_cancel_asks_which_when_a_day_has_several,
