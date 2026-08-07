@@ -429,11 +429,13 @@ class MytSession:
         }
 
     def _call(self, method: str, url: str, *, params=None, body=None,
-              timeout: int = 30, retry_auth: bool = True):
+              timeout: int = 30, retry_auth: bool = True, extra_headers=None):
         self.ensure_fresh()
         headers = self._api_headers()
         if body is not None:
             headers["Content-Type"] = "application/json"
+        if extra_headers:
+            headers.update(extra_headers)
         try:
             r = self._http.request(method, url, params=params, json=body,
                                    headers=headers, timeout=timeout)
@@ -456,7 +458,8 @@ class MytSession:
                 raise MytSessionExpired("http_401", "Токен MyT отклонён повторно.")
             self.refresh()
             return self._call(method, url, params=params, body=body,
-                              timeout=timeout, retry_auth=False)
+                              timeout=timeout, retry_auth=False,
+                              extra_headers=extra_headers)
         if r.status_code >= 400:
             # Kairos отвечает text/plain по-русски («Ответ на встречу можно дать раз
             # в 5 секунд»), workplacer — JSON. Отдаём как есть: текст осмысленный,
@@ -560,6 +563,18 @@ class MytSession:
         self._call("POST", f"{WORKPLACER_BASE}/workplacer/api/booking/parking/{place_id}",
                    body={"date": day, "carNumber": car_number,
                          "carModel": car_model, "buildingId": int(building_id)})
+
+    def parking_cancel(self, place_id, day: str) -> None:
+        """Снять бронь парковки. 200 с пустым телом = принято; проверять через bookings().
+
+        День в ПУТИ, а не в теле: тело пустое. При этом клиент всё равно шлёт
+        Content-Type: application/json — заголовок, описывающий несуществующее
+        тело. Бессмысленно, но снято с захвата и повторяется как есть: угадывать,
+        что серверу можно не присылать, тут не на чем.
+        """
+        self._call("DELETE",
+                   f"{WORKPLACER_BASE}/workplacer/api/booking/parking/{place_id}/date/{day}",
+                   extra_headers={"Content-Type": "application/json"})
 
     def bookings(self, day: str) -> dict:
         """Все брони сотрудника начиная с `day` — не только за этот день.

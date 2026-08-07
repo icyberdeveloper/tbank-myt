@@ -88,7 +88,8 @@ def check_server_starts_from_a_foreign_directory():
         names = {t["name"] for t in tools}
         expected = {"myt_status", "myt_refresh_session", "calendar_schedule",
                     "calendar_event", "calendar_respond", "calendar_cancel",
-                    "parking_places", "parking_book", "office_bookings"}
+                    "parking_places", "parking_book", "parking_cancel",
+                    "office_bookings"}
         missing = expected - names
         check(not missing, f"тулы не доехали до клиента: {sorted(missing)}")
         # Лишний тул — тоже дефект: значит, в установке чужой пакет.
