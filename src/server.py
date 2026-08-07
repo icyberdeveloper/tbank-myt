@@ -45,6 +45,14 @@ _untraced_tool = mcp.tool
 #          занятое машиноместо. Денег не двигает — destructiveHint не ставим, но
 #          и read-only заявлять нельзя.
 #
+# destructiveHint НЕ СТАВИТСЯ НИ НА ОДИН тул здесь, включая calendar_cancel, хотя
+# отмена и необратима, и уведомляет всех участников. Это осознанное решение
+# владельца, а не недосмотр: ничего из этого не стоит денег и всё чинится руками в
+# приложении, а диалог подтверждения на каждой отмене — это способ научить человека
+# жать «разрешить» не читая. Ограничение остаётся там, где оно работает: тул сам
+# требует подтверждения у ПОЛЬЗОВАТЕЛЯ, и об этом сказано в его описании и в скиле.
+# Не «чини» это по итогам очередного аудита, не спросив владельца.
+#
 # Тула без записи в таблице не существует: _annotations_for падает на импорте.
 READ, WRITE = "read", "write"
 TOOL_KINDS: dict[str, tuple[str, str]] = {
@@ -222,7 +230,7 @@ def _set_in(obj, path, value):
     obj[path[-1]] = value
 
 
-def _json_out(data, limit: int = 5000) -> str:
+def _json_out(data, limit: int = 5000, more_hint: str = "") -> str:
     """Serialize a payload for the agent WITHOUT losing records silently.
 
     The old code returned json.dumps(...)[:N]. On real data that severs an object
@@ -267,14 +275,19 @@ def _json_out(data, limit: int = 5000) -> str:
 
     if trims and len(body) <= limit:
         what = ", ".join(f"«{w}» {kept} из {total}" for w, (kept, total) in trims.items())
+        # Пометить срез мало: у читающего должен быть способ его снять. Раньше
+        # его не было вовсе — предел стоял константой в теле тула, и выброшенные
+        # записи не доставались ничем.
+        more = f" {more_hint}" if more_hint else ""
         return (f"# ПОКАЗАНО {what} записей (ответ не помещается целиком). "
                 f"Остальные НЕ включены — не считай по этому фрагменту итогов "
-                f"и сумм.\n{body}")
+                f"и сумм.{more}\n{body}")
 
     # Nothing addressable left to drop: whole records could not save it.
     text = body if trims else full
     dropped = (" Часть записей уже отброшена целиком, и этого не хватило."
                if trims else "")
+    more = f" {more_hint}" if more_hint else ""
     return (f"# ОТВЕТ ОБРЕЗАН: {limit} из {len(text)} символов, и это НЕ валидный "
             f"JSON. Данные неполные — не делай по ним выводов о суммах и "
             f"количестве.{dropped}\n{text[:limit]}")
@@ -507,10 +520,14 @@ def calendar_schedule(date_from: str = "", date_to: str = "", limit: int = 0) ->
 
 
 @mcp.tool()
-def calendar_event(appointment_id: str) -> str:
+def calendar_event(appointment_id: str, max_chars: int = 6000) -> str:
     """Детали встречи: участники, ссылка на созвон, место, повестка, повторяемость.
 
     appointment_id — из calendar_schedule().
+
+    max_chars ограничивает размер ответа; при переполнении первым режется список
+    участников. У большой встречи так теряются десятки коллег, поэтому предел
+    снимается: max_chars=0 — отдать целиком, вместе с полной повесткой.
 
     Для ПОВТОРЯЮЩЕЙСЯ встречи kairos отдаёт не то вхождение, которое ты открыл, а
     мастер серии: `start` там — дата ПЕРВОЙ встречи серии, часто многолетней
@@ -544,9 +561,11 @@ def calendar_event(appointment_id: str) -> str:
             "повторяется": d.get("recurrencePattern") if d.get("isRecurrent") else None,
             "видимость": d.get("visibility"),
             "приватность": d.get("sensitivity"),
-            "повестка": myt.text_from_html(d.get("description") or ""),
+            "повестка": myt.text_from_html(d.get("description") or "",
+                                            limit=0 if max_chars <= 0 else 1200),
         }
-        return _json_out(out, 6000)
+        return _json_out(out, max_chars,
+                         more_hint=f"Полностью: calendar_event('{appointment_id}', max_chars=0).")
     except Exception as e:
         return _err(e)
 
@@ -744,7 +763,9 @@ def parking_book(date: str, place_id: int, car_number: str = "", car_model: str 
     Пустые car_number/car_model/building_id берутся из прошлой брони.
 
     Сервер отвечает 200 с ПУСТЫМ телом и на успех, и молча — поэтому тул после
-    записи перечитывает брони и печатает то, что действительно сохранилось.
+    записи перечитывает брони и печатает то, что действительно сохранилось,
+    включая номер машины: пользователь должен видеть, на какую машину легла бронь,
+    иначе он не заметит, что подставилась не та.
     Номер машины при этом вернётся транслитом (А000АА000 → A000AA000): так его
     хранит workplacer, это не ошибка."""
     try:
@@ -825,7 +846,7 @@ def parking_book(date: str, place_id: int, car_number: str = "", car_model: str 
 
 
 @mcp.tool()
-def office_bookings(date: str = "") -> str:
+def office_bookings(date: str = "", max_chars: int = 4000) -> str:
     """Мои брони в офисе: парковка, рабочее место, локеры (MyT, НЕ банк).
 
     Пустая дата = сегодня. Возвращает брони НАЧИНАЯ с этой даты, а не только за
@@ -860,7 +881,8 @@ def office_bookings(date: str = "") -> str:
             "закреплённая_парковка": d.get("parkingFixedPlaces") or [],
             "локеры": (d.get("lockerBookings") or []) + (d.get("lockerBoxBookings") or []),
         }
-        return _json_out(out, 4000)
+        return _json_out(out, max_chars,
+                         more_hint=f"Полностью: office_bookings('{date}', max_chars=0)." )
     except Exception as e:
         return _err(e)
 
