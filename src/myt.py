@@ -317,7 +317,21 @@ class MytSession:
         return data
 
     def _adopt(self, data: dict) -> None:
-        self.access_token = data.get("accessToken") or ""
+        """Принять выданную пару токенов — или не принять ничего.
+
+        Проверка не формальность. Раньше здесь стояло `data.get("accessToken") or ""`,
+        и ответ 200 без токена — усечённый прокси, сменившаяся форма, что угодно —
+        клал в сессию пустую строку, писал её на диск и возвращался как успех. То
+        есть штатно выглядящий ответ УНИЧТОЖАЛ рабочую сессию, а тул рапортовал
+        «обмен прошёл, сессия свежая». Пустой токен бесполезен ровно так же, как
+        отсутствующий, поэтому единственное безопасное поведение — не трогать то,
+        что уже есть, и сказать вслух."""
+        token = str(data.get("accessToken") or "")
+        if not token:
+            raise MytApiError("NO_TOKEN",
+                "Сервер ответил без accessToken — прежняя сессия не тронута. "
+                f"Пришли поля: {', '.join(sorted(data)) or '(пусто)'}.")
+        self.access_token = token
         self.refresh_token = data.get("refreshToken") or self.refresh_token
         self.expires_in = int(data.get("expiresIn") or 3600)
         self._minted_at = time.time()
