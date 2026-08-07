@@ -1,12 +1,12 @@
 """Run every test file and report one verdict.
 
-The tests are standalone scripts (no pytest), which is fine — but running nine of
-them by hand means, in practice, running the one you just touched. This runs them
+The tests are standalone scripts (no pytest), which is fine — but running them
+by hand means, in practice, running the one you just touched. This runs them
 all, isolates each in its own process, and points the journal/event logs at a temp
 directory so a test run never appends to the user's real diagnostics files.
 
     python3 tests/run_all.py            # everything
-    python3 tests/run_all.py transfer   # only files whose name contains "transfer"
+    python3 tests/run_all.py parking    # only files whose name contains "parking"
 """
 import os
 import subprocess

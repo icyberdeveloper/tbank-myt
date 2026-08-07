@@ -1,16 +1,14 @@
 """Every tool call, recorded — so it can be seen HOW an agent uses this MCP.
 
-`observability.py` already logs the checkout/payment path step by step. That answers
-"what did this payment do". It cannot answer the question this module exists for:
-*which tools does an agent reach for, in what order, what does it get back, and where
-does it get stuck* — because the tools it never reached, the arguments it guessed
-wrong and the refusals it read and retried leave no trace anywhere.
+Ни один сервис не расскажет, КАК им пользуются: тулы, до которых агент не дошёл,
+аргументы, которые он угадал неверно, и отказы, которые он прочитал и повторил, не
+оставляют следа нигде. Этот модуль — единственное место, где это видно.
 
 WHAT IS RECORDED, per call: the tool name, its arguments (redacted, see below), how
 long it took, whether the error path was taken, how big the answer was, and the FIRST
 LINE of that answer. That last field is the important one: the tools return strings,
-and a refusal — «NO_STORE_CONTEXT», «Неизвестное поле сортировки», «Перевод НЕ
-выполнен» — is a perfectly ordinary return value. The first line is what the agent
+and a refusal — «MYT SESSION EXPIRED», «Назови ДЕНЬ вхождения», «Место NNN НЕ
+забронировано» — is a perfectly ordinary return value. The first line is what the agent
 actually read, and grouping by it later shows which messages agents run into.
 
 WHAT IS **NOT** CLASSIFIED HERE. It would be easy to label each call ok / empty /
@@ -19,10 +17,10 @@ first time a message is reworded, and it would rot silently, turning a real fail
 into a green count. So this module records faithfully and `report()` groups at read
 time — the messages come out of the data, not out of a list somebody maintained.
 
-SAFETY. Values go through observability._redact_value (by key name and by value
+SAFETY. Values go through redact._redact_value (by key name and by value
 pattern), then are truncated. Arguments that are free text a person wrote or a
-secret — a messenger message, a transfer description, a payment purpose, a scanned
-QR, a password, an OTP — are never stored at all, only their length.
+secret — a comment to a meeting organiser, a car plate, a password — are never
+stored at all, only their length.
 
 The argument tuple is also reduced to one short digest, so two identical calls in a
 row can be spotted without keeping what was in them. That digest is keyed with a
@@ -49,7 +47,7 @@ import secrets
 import time
 import uuid
 
-from .observability import _is_sensitive_key, _redact_value, redact_text
+from .redact import _is_sensitive_key, _redact_value, redact_text
 
 TRACE_FILE = os.environ.get(
     "MYT_TRACE_FILE",
@@ -57,34 +55,23 @@ TRACE_FILE = os.environ.get(
 )
 MAX_BYTES = int(os.environ.get("MYT_TRACE_MAX_BYTES", 5 * 1024 * 1024))
 
-# Arguments never stored, only measured. Free text a human wrote (a chat message, a
-# transfer note) is theirs, and a credential is a credential — neither tells us
-# anything about how the agent USES the tool, which is the whole point here.
+# Arguments never stored, only measured. Free text a human wrote is theirs, and a
+# credential is a credential — neither says anything about HOW the agent uses the
+# tool, which is the whole point here.
 #
-# "fields" (pay_bill's provider-defined JSON blob) belongs here too: its schema is
-# whatever the provider asks for — fio, docNumber (a passport number), ipNum (an
-# FSSP case number), a traffic-fine decree number — and none of that matches
-# _REDACT_KEY by name, so it used to reach calls.jsonl almost verbatim. A per-key
-# allowlist can't keep up with an open-ended provider schema; only length survives.
-#
-# `qr` and `comment` were added after a payment QR turned out to defeat every other
-# rule at once. The ГОСТ Р 56042-2014 string packs the payee's name, their 20-digit
-# settlement account, the corr account, ИНН and КПП into one value — and `_MAX_ARG`
-# cuts at 64 characters, which lands just past `PersonalAcc=<20 digits>`. Neither key
-# matches _REDACT_KEY, while the SAME account passed as `account_number` is redacted
-# because that name contains "account". Which meant the protection depended on which
-# argument the agent happened to use. `comment` is назначение платежа: an invoice
-# number, a contract, what was bought — the exact class `description` is opaque for.
-# `car_number` is the same class as an account number and matches no redaction rule:
-# a plate identifies a person outside this repo, in a place where the trace cannot
-# help — a parking barrier.
+# `comment` is the note that goes to the meeting organiser: a person wrote it for
+# another person, and it is exactly the class `description` is opaque for.
+# `car_number` matches no redaction rule by name or by shape — a plate has no run of
+# four digits — and it identifies someone in a place where a log cannot help them: a
+# parking barrier. See the note next to _RE_PLATE below for why it is nevertheless
+# printed in the tool's ANSWER.
 _OPAQUE_ARGS = {"text", "description", "password", "pin", "otp", "code", "body",
                 "save_to", "comment", "car_number"}
 
 # Tools whose ANSWER contains text a person wrote — the message just sent, the chat
 # history, the preview of the last message in each conversation. Blanking the
-# argument is not enough when the tool echoes it straight back: messenger_send
-# returns «Отправлено в чат …: «<the whole message>»». For these the first line is
+# argument is not enough when the tool echoes it straight back: calendar_respond
+# returns the comment it just sent to the organiser. For these the first line is
 # replaced by its length — unless the call FAILED, in which case the first line is an
 # error string from _err(), which is already redacted and is the thing worth keeping.
 # calendar_respond echoes the comment the user wrote for the organiser, and the
@@ -216,12 +203,11 @@ def _append(rec: dict) -> None:
         pass
 
 
-# Set by server._err() alongside the exception class. The bank's own code is the
-# one field that makes a failure searchable afterwards: this incident left no
-# trace at all — 4701 rows, 346 failures, and not one carried
-# REQUEST_RATE_LIMIT_EXCEEDED as anything but prose inside a redacted `head`,
-# because get_requisites calls issued INSIDE transfer() are recorded as
-# tool="transfer".
+# Проставляется server._err() рядом с классом исключения. Класс говорит, что
+# сломалось у НАС; код сервиса — что ответил он. Без кода отдельным полем причина
+# остаётся только прозой внутри отредактированного `head`, а по прозе потом ничего
+# не найти: «http_403» от kairos и «sms_required» от авторизации сольются в одну
+# неразличимую строку отчёта.
 def note_code(code: str) -> None:
     if code:
         _last_error["code"] = str(code)[:64]
@@ -342,7 +328,7 @@ def report(rows: list[dict], top: int = 6) -> dict:
 
     Deliberately NOT a health score. Every number here points at specific rows a
     person can go and read; a single «87% healthy» would hide exactly the rare call
-    that broke a checkout."""
+    that broke a run."""
     per: dict = {}
     heads: dict = {}
     transitions: dict = {}

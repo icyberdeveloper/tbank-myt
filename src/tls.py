@@ -20,7 +20,7 @@ failure it ran `openssl s_client` against the failing host — with no verificat
 and appended whatever certificates came back into the file used as `verify=`. The
 only gate was a substring match on the leaf's Subject DN, a field supplied by
 whoever answered the connection. So any machine-in-the-middle presenting a
-self-signed certificate with `*.t-bank-app.ru` in its subject got itself installed
+a self-signed certificate with the right-looking subject got itself installed
 as a trust anchor, and the retry then succeeded. TLS verification was not weakened,
 it was *inverted*: the attacker chose the trust store. That is gone. Trust now comes
 only from the system store and from root certificates committed to this repo and
@@ -214,8 +214,8 @@ def rebuild_bundle(hosts=None, out: str | None = None) -> str:
     roots = load_roots()
     parts.extend(roots)
     if not roots:
-        _log(f"no extra roots loaded from {ROOTS_DIR} — *.t-bank-app.ru will FAIL to "
-             f"verify (its root is not in any system store)")
+        _log(f"no extra roots loaded from {ROOTS_DIR} — magentbep.tcsbank.ru will FAIL to "
+             f"verify (its root is not in any system store) — no login, no token refresh")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as fh:
         fh.write("\n".join(parts))
@@ -228,12 +228,13 @@ class RobustTLSAdapter(HTTPAdapter):
     This is not the old self-healing: nothing is learned from the peer. It recovers
     the one failure that actually happened in practice — `ca/bundle.pem` missing or
     truncated (it is a generated file, gitignored, and a fresh clone has none; see
-    6f7274d) — and then re-raises with an explanation instead of retrying forever."""
+    the bundle did not exist yet) — and then re-raises with an explanation instead
+    of retrying forever."""
 
     # Methods that are safe to send twice. A TLS error usually means the handshake
     # failed and nothing was transmitted — but `requests` also raises SSLError on a
     # mid-stream read, after the body has gone out. Replaying a POST there would
-    # repeat /v1/pay or a ticket payment, so those are rebuilt-and-re-raised instead:
+    # blindly repeat a booking or a cancellation, so those are re-raised instead:
     # the caller decides, and the next call finds a healthy bundle either way.
     _REPLAYABLE = {"GET", "HEAD", "OPTIONS"}
 
