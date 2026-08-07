@@ -27,6 +27,17 @@ from datetime import timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Запуск НАПРЯМУЮ («python3 tests/test_myt_calendar_parking.py», как написано в
+# докстринге выше) раньше дописывал два десятка синтетических вызовов в настоящий
+# ~/.local/share/tbank-myt/calls.jsonl: переменные окружения выставлял только
+# run_all.py. Тест, портящий данные пользователя, — плохой тест, поэтому уводим
+# файлы сами, если этого ещё не сделали снаружи.
+import tempfile as _tempfile  # noqa: E402
+_scratch = _tempfile.mkdtemp(prefix="myt-test-")
+for _var, _name in (("MYT_TRACE_FILE", "calls.jsonl"), ("MYT_EVENTS", "events.jsonl"),
+                    ("MYT_SESSION", "session.json")):
+    os.environ.setdefault(_var, os.path.join(_scratch, _name))
+
 from src import myt, server  # noqa: E402
 from src.errors import MytApiError  # noqa: E402
 
@@ -838,33 +849,76 @@ def check_a_lost_save_is_never_reported_as_success():
 
 
 def check_corporate_login_does_not_reach_the_trace():
-    """Корпоративный логин — не то, что должно оседать в calls.jsonl.
+    """Логин не должен оседать в calls.jsonl — и это надо ПРОЧИТАТЬ из файла.
 
-    `_RE_LONG_ID` маскирует прогоны из 4+ цифр, а логин вида «i.ivanov» под это не
-    попадает; поэтому оба MyT-статусных тула глушат голову ответа целиком."""
+    Прежняя версия проверяла `name in trace._ECHOES_USER_TEXT`, то есть членство
+    имени в множестве. Такой тест переживает отключение самого механизма: аудит
+    отключил ветку в trace.record — набор остался зелёным, а логин лёг в файл
+    дословно. Проверяем то, что записано, а не то, что объявлено."""
+    import importlib
+    import tempfile
     from src import trace
-    for name in ("myt_status", "myt_refresh_session"):
-        check(name in trace._ECHOES_USER_TEXT,
-              f"{name} печатает данные сотрудника — его голова не должна писаться дословно")
-    print("  трассировка: голова обоих статусных тулов не пишется дословно")
+
+    tmp = tempfile.mkdtemp()
+    path = os.path.join(tmp, "calls.jsonl")
+    was_file, was_on = trace.TRACE_FILE, os.environ.get("MYT_TRACE")
+    trace.TRACE_FILE = path
+    os.environ.pop("MYT_TRACE", None)
+    try:
+        with_session(session({("GET", "/api/Appointment/short"): resp_of("schedule")}))
+        s = server._myt_session
+        s.username = "i.ivanov"                      # корпоративный логин
+        s.user_id = "3f2a1b7c-9d4e-4a11-8b2c-77ee9911aabb"
+        server.myt_status()                          # идёт через trace.wrap
+
+        rows = [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
+        check(rows, "трассировка ничего не записала — тест бы не проверил ничего")
+        blob = json.dumps(rows, ensure_ascii=False)
+        check("i.ivanov" not in blob, f"логин попал в calls.jsonl: {blob[:200]}")
+        check("3f2a1b7c" not in blob, f"UUID сотрудника попал в calls.jsonl: {blob[:200]}")
+        check(any(r.get("tool") == "myt_status" for r in rows),
+              f"вызов вообще не записан, значит проверять было нечего: {blob[:200]}")
+    finally:
+        trace.TRACE_FILE = was_file
+        if was_on is not None:
+            os.environ["MYT_TRACE"] = was_on
+    print("  трассировка: логин и UUID не найдены в записанном файле")
 
 
-def check_status_stays_a_read_tool():
-    """myt_status помечен read-only, значит не должен ДЕЛАТЬ обновление целью.
+def check_status_costs_one_request_on_a_fresh_token():
+    """myt_status помечен read-only — значит он не ходит обновляться без нужды.
 
-    Продление всё равно случится внутри `_call`, если пора, — ровно как у любого
-    другого читающего тула и как у банковского session_status. Но отдельного
-    ensure_fresh здесь быть не должно: хост вправе звать read-only тул без спроса."""
-    import inspect
-    src = inspect.getsource(server.myt_status.__wrapped__ if hasattr(server.myt_status, "__wrapped__")
-                            else server.myt_status)
-    check("ensure_fresh()" not in src,
-          "myt_status не должен звать ensure_fresh явно — это делает обновление его целью")
+    Прежняя версия доказывала это через inspect.getsource и поиск подстроки
+    «ensure_fresh()» в тексте функции. Такой тест проверяет, что кто-то что-то
+    набрал, и ломается от комментария; а главное — он бы прошёл и на коде, который
+    обновляет токен окольным путём. Проверяем наблюдаемое: на свежем токене статус
+    делает РОВНО один запрос, и это чтение календаря, а не обмен."""
+    s = with_session(session({("GET", "/api/Appointment/short"): resp_of("schedule"),
+                              ("POST", "/v3/auth/token"): FakeResp(200, {
+                                  "accessToken": "x", "refreshToken": "r",
+                                  "expiresIn": 3600, "tokenType": "Bearer"})}))
+    server.myt_status()
+    urls = [c["url"] for c in s._http.calls]
+    check(len(urls) == 1, f"на свежем токене статус обязан стоить один запрос: {urls}")
+    check("/api/Appointment/short" in urls[0], f"и это должно быть чтение: {urls[0]}")
+
+    # А на протухшем — продление случается ПОПУТНО, внутри чтения, и статус это
+    # сообщает. Именно это отличает «обновление по дороге» от «обновление как цель».
+    s = with_session(session({("GET", "/api/Appointment/short"): resp_of("schedule"),
+                              ("POST", "/v3/auth/token"): FakeResp(200, {
+                                  "accessToken": "новый", "refreshToken": "r",
+                                  "expiresIn": 3600, "tokenType": "Bearer"})}))
+    s._minted_at = 1.0
+    out = json.loads(server.myt_status())
+    check(out["токен_обновлён_этим_вызовом"] is True,
+          f"протухший токен обязан быть переминчен по дороге: {out}")
+    check(out["статус"].startswith("жива"), f"и статус остаётся живым: {out}")
+
     tools = {t.name: t for t in server.mcp._tool_manager.list_tools()}
     check(tools["myt_status"].annotations.readOnlyHint is True, "myt_status остаётся read-only")
     check(tools["myt_refresh_session"].annotations.readOnlyHint is False,
           "myt_refresh_session меняет состояние намеренно — read-only ему нельзя")
-    print("  классификация: обновление — цель только у refresh, у статуса оно попутное")
+    print("  статус: один запрос на свежем токене, продление только попутное")
 
 
 def check_refresh_tool_does_the_capture_exchange():
@@ -940,6 +994,44 @@ def check_status_verifies_instead_of_doing_arithmetic():
     print("  статус: проверяет запросом, сам продлевает, мёртвую не выдаёт за живую")
 
 
+def check_every_cut_announces_itself():
+    """Обрезание без пометки — тихая потеря. У этой машинерии не было ни одного
+    исполняемого теста: она вся держалась на том, что её никто не трогал."""
+    # _rows_out: настоящий итог и аргумент, которым достать остальное.
+    rows = [{"n": i} for i in range(50)]
+    out = server._rows_out(rows, lambda r: f"строка {r['n']}", limit=5, total=len(rows),
+                           header="Встречи")
+    check("50 всего, показано 5" in out, f"шапка обязана назвать итог: {out.splitlines()[0]}")
+    check("limit=50" in out, f"и способ увидеть всё: {out.splitlines()[0]}")
+    check(len(out.splitlines()) == 6, "показано должно быть ровно столько, сколько сказано")
+    full = server._rows_out(rows, lambda r: f"строка {r['n']}", limit=0, total=len(rows),
+                            header="Встречи")
+    check(len(full.splitlines()) == 51, "limit=0 значит ВСЁ, а не ничего")
+
+    # _json_out: режет целыми элементами и говорит, сколько выбросил.
+    big = {"участники": [{"кто": f"Сотрудник {i}", "почта": f"user{i}@example.com"}
+                         for i in range(200)]}
+    cut = server._json_out(big, 800)
+    check("ПОКАЗАНО" in cut.upper() or "показано" in cut,
+          f"выброшенное должно быть названо: {cut[-200:]}")
+    kept = cut.count('"кто"')
+    check(0 < kept < 200, f"должно быть урезано, но не досуха: осталось {kept}")
+    check(server._json_out(big, 0) == json.dumps(big, ensure_ascii=False),
+          "limit<=0 — без ограничения")
+
+    # _cut: помечает срез, а не молча укорачивает.
+    check(server._cut("а" * 100, 10).endswith("…"), "срез строки помечается многоточием")
+    check(server._cut("коротко", 100) == "коротко", "то, что влезает, не трогается")
+
+    # Повестка встречи: длинный текст обрезается с указанием полной длины.
+    long_html = "<p>" + "текст " * 500 + "</p>"
+    agenda = myt.text_from_html(long_html, limit=200)
+    check("обрезано" in agenda, f"повестка обязана сказать, что обрезана: {agenda[-80:]}")
+    check(str(len("текст " * 500)) in agenda or "всего" in agenda,
+          f"и назвать полную длину: {agenda[-80:]}")
+    print("  обрезания: итог, способ достать остальное и пометка среза — на всех четырёх")
+
+
 def check_no_session_does_not_pretend():
     server._myt_session = None
     saved, server._MYT_FILE = server._MYT_FILE, os.path.join(HERE, "no-such-myt.json")
@@ -1009,9 +1101,10 @@ def main():
                check_respond_does_not_claim_what_it_did_not_see,
                check_a_lost_save_is_never_reported_as_success,
                check_corporate_login_does_not_reach_the_trace,
-               check_status_stays_a_read_tool,
+               check_status_costs_one_request_on_a_fresh_token,
                check_refresh_tool_does_the_capture_exchange,
                check_status_verifies_instead_of_doing_arithmetic,
+               check_every_cut_announces_itself,
                check_no_session_does_not_pretend,
                check_fixture_still_matches_capture):
         fn()
