@@ -569,10 +569,16 @@ def calendar_respond(appointment_id: str, response: str, comment: str = "") -> s
         if now and now != applied:
             return (f"Отправлено {applied} ({word}), но kairos сейчас показывает {now}. "
                     f"Проверь встречу в приложении.")
-        return (f"Ответ записан: {applied} ({word})"
-                + (f", комментарий: {_flat(comment)}" if comment else "")
-                + (f". Сервер подтверждает: {now}." if now else
-                   ". Перечитать статус не удалось — проверь calendar_event()."))
+        tail = f", комментарий: {_flat(comment)}" if comment else ""
+        if not now:
+            # Глагол выбирается по тому, что мы ЗНАЕМ. «Записан» — утверждение о
+            # состоянии встречи; когда подтверждающее перечитывание не прошло, мы
+            # знаем только, что запрос ушёл. Соседний calendar_cancel в такой же
+            # ситуации этого глагола избегает — здесь он оставался по недосмотру.
+            return (f"Ответ ОТПРАВЛЕН: {applied} ({word}){tail}. Подтвердить не удалось "
+                    f"— перечитывание встречи не вернуло статус. Проверь "
+                    f"calendar_event('{appointment_id}').")
+        return f"Ответ записан: {applied} ({word}){tail}. Сервер подтверждает: {now}."
     except Exception as e:
         return _err(e)
 
@@ -727,8 +733,31 @@ def parking_book(date: str, place_id: int, car_number: str = "", car_model: str 
                 return (f"{day} — дальше окна бронирования: парковка открыта только на "
                         f"{horizon} дн. вперёд, то есть по {last_day} включительно.")
         s.parking_book(place_id, day, num, model, bid)
-        saved = [b for b in (s.bookings(day).get("parkingBookings") or [])
-                 if str(b.get("date")) == day]
+        # Запись ушла и могла сработать. Всё, что ниже, — попытка узнать, что
+        # именно легло на сервер; провал этой попытки НЕ означает, что брони нет.
+        try:
+            rows = [b for b in (s.bookings(day).get("parkingBookings") or [])
+                    if str(b.get("date")) == day]
+        except Exception as e:
+            return (f"Запрос на бронь места {place_id} на {day} отправлен и принят, но "
+                    f"проверить результат не удалось ({_cut(_redact_value(str(e)), 120)}). "
+                    f"Бронь могла сохраниться — не бронируй заново вслепую, сначала "
+                    f"посмотри office_bookings('{day}').")
+        # Сверяем ИМЕННО наше место. Раньше бралась первая строка на эту дату, и
+        # если бронь на день уже была, тул печатал её — чужое место, чужой этаж,
+        # чужую машину — как будто это результат текущего вызова.
+        saved = [b for b in rows if str(b.get("parkingPlaceId")) == str(place_id)]
+        if not saved and rows:
+            b = rows[0]
+            # Говорим только то, что видим: нашего места в списке нет, а другое —
+            # есть. Почему сервер не принял бронь, мы не знаем: правило «одна бронь
+            # на день» напрашивается, но в наблюдаемом трафике его никто не
+            # подтверждал, и выдавать догадку за причину здесь нельзя.
+            return (f"Место {place_id} НЕ забронировано. На {day} в твоих бронях стоит "
+                    f"другое место — {b.get('position')}, этаж {b.get('floorName')}, "
+                    f"{b.get('buildingName')}. Если эта бронь не нужна, сними её в "
+                    f"приложении MyT и повтори; если нужна — место {place_id} на этот "
+                    f"день получить не удалось.")
         if not saved:
             # Пустая марка — первый подозреваемый: в захвате carModel непустая всегда,
             # то есть эта комбинация ни разу не проверена на живом сервере. Молча

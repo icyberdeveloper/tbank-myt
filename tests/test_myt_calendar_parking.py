@@ -619,6 +619,94 @@ def check_meeting_times_are_converted_to_the_employee_timezone():
     print("  время: UTC → пояс сотрудника, подпись в шапке, ключ отмены не тронут")
 
 
+def check_a_token_less_answer_never_replaces_the_session():
+    """200 без accessToken — не обмен, а потеря сессии, если его принять.
+
+    Раньше `data.get("accessToken") or ""` клал в сессию пустую строку, писал её на
+    диск и возвращался как успех: штатно выглядящий ответ уничтожал рабочую сессию,
+    а тул печатал «обмен прошёл, сессия свежая»."""
+    s = with_session(session({("POST", "/v3/auth/token"): FakeResp(200, {
+        "expiresIn": 3600, "tokenType": "Bearer"})}))          # токена в ответе нет
+    was_token, was_refresh = s.access_token, s.refresh_token
+    out = server.myt_refresh_session()
+    check("свежая" not in out, f"это не успех, так говорить нельзя: {out[:90]}")
+    check("accessToken" in out, f"надо назвать, чего не хватило в ответе: {out[:120]}")
+    check(s.access_token == was_token, "прежний токен обязан уцелеть")
+    check(s.refresh_token == was_refresh, "refresh-токен трогать тоже незачем")
+
+    # А нормальный ответ по-прежнему принимается.
+    s2 = with_session(session({("POST", "/v3/auth/token"): FakeResp(200, {
+        "accessToken": "новый", "refreshToken": "r", "expiresIn": 3600,
+        "tokenType": "Bearer"})}))
+    ok = json.loads(server.myt_refresh_session())
+    check(ok["access_токен_сменился"] is True, f"валидный обмен должен пройти: {ok}")
+    print("  обмен: ответ без токена не принимается и сессию не портит")
+
+
+def check_booking_is_confirmed_by_place_not_by_date():
+    """Перечитывание должно узнавать НАШЕ место, а не любую бронь на этот день."""
+    day = today(1)
+    чужая = {"parkingBookings": [{"date": day, "position": "999", "floorName": "-1",
+                                  "buildingName": "Офис 2", "carNumber": "X000XX99",
+                                  "carModel": "Other", "parkingPlaceId": 11111}]}
+    routes = {("GET", "/parking/last"): resp_of("parking_last"),
+              ("GET", "/booking-front-settings"): resp_of("front_settings"),
+              ("POST", "/booking/parking/"): FakeResp(200),
+              ("GET", "/all-user-bookings"): FakeResp(200, чужая)}
+    with_session(session(routes))
+    out = server.parking_book(day, 56239)
+    check("Забронировано" not in out,
+          f"чужая бронь не может выдаваться за нашу: {out[:110]}")
+    check("999" in out and "стоит\n          другое место" not in out and "другое место" in out,
+          f"надо объяснить, ЧТО там на самом деле: {out[:140]}")
+
+    # Наше место в списке — вот теперь это успех.
+    наша = {"parkingBookings": [dict(чужая["parkingBookings"][0],
+                                     position="194", parkingPlaceId=56239)]}
+    routes[("GET", "/all-user-bookings")] = FakeResp(200, наша)
+    with_session(session(routes))
+    out = server.parking_book(day, 56239)
+    check(out.startswith("Забронировано") and "194" in out,
+          f"своя бронь должна подтверждаться: {out[:110]}")
+    print("  бронь: подтверждение сверяется по place_id, а не по дате")
+
+
+def check_a_failed_reread_does_not_deny_the_write():
+    """POST принят, перечитывание упало — место могло быть занято, и это надо сказать."""
+    day = today(1)
+    s = with_session(session({
+        ("GET", "/parking/last"): resp_of("parking_last"),
+        ("GET", "/booking-front-settings"): resp_of("front_settings"),
+        ("POST", "/booking/parking/"): FakeResp(200),
+        ("GET", "/all-user-bookings"): FakeResp(500, text="wp down"),
+    }))
+    out = server.parking_book(day, 56239)
+    check("принят" in out or "отправлен" in out,
+          f"нельзя отдавать голую ошибку: запись-то ушла — {out[:120]}")
+    check("могла сохраниться" in out, f"надо предупредить о возможной броне: {out[:140]}")
+    check("office_bookings" in out, f"надо назвать, чем проверить: {out[:140]}")
+    check("НЕ забронировано" not in out, f"отрицать бронь мы не вправе: {out[:120]}")
+    print("  бронь: сбой перечитывания не выдаётся за отсутствие брони")
+
+
+def check_respond_does_not_claim_what_it_did_not_see():
+    """«Записан» — утверждение о встрече. Без подтверждения знаем только «отправлен»."""
+    aid = "00000000-0000-4000-8000-000000000013"
+    with_session(session({("PUT", "/api/Appointment/answer"): FakeResp(200),
+                          ("GET", "/api/Appointment/"): FakeResp(500, text="kairos down")}))
+    out = server.calendar_respond(aid, "пойду")
+    check("ОТПРАВЛЕН" in out, f"глагол должен быть про запрос, а не про встречу: {out[:110]}")
+    check("Ответ записан" not in out, f"«записан» без подтверждения — ложь: {out[:110]}")
+    check("calendar_event" in out, f"надо сказать, чем проверить: {out[:130]}")
+
+    with_session(session({("PUT", "/api/Appointment/answer"): FakeResp(200),
+                          ("GET", "/api/Appointment/"): FakeResp(200, {
+                              "currentUserMeetingResponseType": "Accept"})}))
+    out = server.calendar_respond(aid, "пойду")
+    check(out.startswith("Ответ записан"), f"с подтверждением — можно «записан»: {out[:110]}")
+    print("  ответ на встречу: «отправлен» без подтверждения, «записан» — только с ним")
+
+
 def check_a_lost_save_is_never_reported_as_success():
     """Обмен, не доехавший до диска, — не успех.
 
@@ -823,6 +911,10 @@ def main():
                check_event_keeps_what_matters,
                check_timezone_is_resolved_not_assumed,
                check_meeting_times_are_converted_to_the_employee_timezone,
+               check_a_token_less_answer_never_replaces_the_session,
+               check_booking_is_confirmed_by_place_not_by_date,
+               check_a_failed_reread_does_not_deny_the_write,
+               check_respond_does_not_claim_what_it_did_not_see,
                check_a_lost_save_is_never_reported_as_success,
                check_corporate_login_does_not_reach_the_trace,
                check_status_stays_a_read_tool,
