@@ -521,20 +521,28 @@ def calendar_event(appointment_id: str, max_chars: int = 6000) -> str:
     снимается: max_chars=0 — отдать целиком, вместе с полной повесткой.
 
     Для ПОВТОРЯЮЩЕЙСЯ встречи kairos отдаёт не то вхождение, которое ты открыл, а
-    мастер серии: `start` там — дата ПЕРВОЙ встречи серии, часто многолетней
-    давности. Поле «повторяется» об этом скажет; время конкретного вхождения бери
-    из calendar_schedule()."""
+    мастер серии — поэтому время в ответе называется «начало_серии», а не «начало»:
+    это дата ПЕРВОЙ встречи, часто многолетней давности. Время нужного дня бери из
+    calendar_schedule()."""
     try:
         s = _require_myt()
         tz, tz_src = s.tz()
         d = s.appointment(appointment_id)
         parts = d.get("participants") or []
         start, end = myt.to_local(d.get("start"), tz), myt.to_local(d.get("end"), tz)
+        # У повторяющейся встречи kairos отдаёт мастер серии, и поле, названное
+        # просто «начало», врёт тем сильнее, чем старше серия: у еженедельной
+        # встречи там дата полугодовой давности. Поле «повторяется» рядом, но
+        # рассчитывать, что читатель сопоставит два поля, — значит рассчитывать на
+        # внимательность вместо однозначности. Имя ключа говорит само.
+        recurrent = bool(d.get("isRecurrent"))
+        k_start = "начало_серии" if recurrent else "начало"
+        k_end = "конец_серии" if recurrent else "конец"
         out = {
             "id": d.get("id"),
             "название": _flat(d.get("title") or "(без названия)"),
-            "начало": f"{start:%Y-%m-%d %H:%M}" if start else d.get("start"),
-            "конец": f"{end:%Y-%m-%d %H:%M}" if end else d.get("end"),
+            k_start: f"{start:%Y-%m-%d %H:%M}" if start else d.get("start"),
+            k_end: f"{end:%Y-%m-%d %H:%M}" if end else d.get("end"),
             "пояс": f"{myt.tz_label(tz)} ({tz_src})",
             "мой_ответ": d.get("currentUserMeetingResponseType"),
             "отменена": d.get("isCancelled"),
@@ -549,12 +557,15 @@ def calendar_event(appointment_id: str, max_chars: int = 6000) -> str:
                  "организатор": p.get("isOwner")}
                 for p in parts
             ],
-            "повторяется": d.get("recurrencePattern") if d.get("isRecurrent") else None,
+            "повторяется": d.get("recurrencePattern") if recurrent else None,
             "видимость": d.get("visibility"),
             "приватность": d.get("sensitivity"),
             "повестка": myt.text_from_html(d.get("description") or "",
                                             limit=0 if max_chars <= 0 else 1200),
         }
+        if recurrent:
+            out["время_нужного_дня"] = ("здесь начало ВСЕЙ серии; время конкретного "
+                                        "дня — в calendar_schedule(<день>)")
         return _json_out(out, max_chars,
                          more_hint=f"Полностью: calendar_event('{appointment_id}', max_chars=0).")
     except Exception as e:

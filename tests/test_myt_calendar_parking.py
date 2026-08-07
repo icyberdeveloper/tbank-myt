@@ -422,6 +422,39 @@ def check_cancel_reports_that_nothing_changed():
     print("  отмена: рапорт по перечитанному расписанию, а не по коду 200")
 
 
+def check_recurring_event_names_its_start_a_series_start():
+    """У серии ключ называется «начало_серии» — потому что это оно и есть.
+
+    Kairos на любое вхождение отдаёт мастер серии, и у еженедельной встречи в
+    поле start лежит дата полугодовой давности. Пока ключ назывался «начало»,
+    ответ был формально верен и практически ложен: агент, спрошенный «во сколько
+    сегодня», читал апрель. Соседнее поле «повторяется» эту ловушку не снимает —
+    оно требует, чтобы читатель сопоставил два поля и сам заподозрил подвох."""
+    aid = "00000000-0000-4000-8000-00000000000e"
+    master = {"id": aid, "title": "Weekly", "start": "2026-04-20T15:00:00+00:00",
+              "end": "2026-04-20T16:00:00+00:00", "isRecurrent": True,
+              "recurrencePattern": "FREQ=WEEKLY;BYDAY=MO"}
+    with_session(session({("GET", f"/api/Appointment/{aid}"): FakeResp(200, master)}))
+    d = json.loads(server.calendar_event(aid))
+    check("начало_серии" in d, f"у серии ключ должен называться начало_серии: {sorted(d)}")
+    check("начало" not in d,
+          "ключа «начало» у серии быть не должно — иначе разведение имён бессмысленно")
+    check("конец_серии" in d and "конец" not in d, f"конец — так же: {sorted(d)}")
+    check("calendar_schedule" in str(d.get("время_нужного_дня", "")),
+          "надо сказать, где взять время нужного дня, а не только чем оно не является")
+
+    # А у разовой встречи — обычные имена: там start и есть начало встречи.
+    aid2 = "00000000-0000-4000-8000-00000000000f"
+    once = {"id": aid2, "title": "Разовая", "start": "2026-08-10T08:30:00+00:00",
+            "end": "2026-08-10T09:00:00+00:00", "isRecurrent": False}
+    with_session(session({("GET", f"/api/Appointment/{aid2}"): FakeResp(200, once)}))
+    d = json.loads(server.calendar_event(aid2))
+    check("начало" in d and "начало_серии" not in d,
+          f"у разовой встречи начало — это начало: {sorted(d)}")
+    check("время_нужного_дня" not in d, "разовой встрече оговорка не нужна")
+    print("  calendar_event: имя ключа не даёт принять начало серии за начало встречи")
+
+
 def check_cancel_of_a_series_needs_a_day_and_resolves_it_itself():
     """Для серии нужен ДЕНЬ — и по нему тул сам находит момент, который ждёт kairos.
 
@@ -1114,6 +1147,7 @@ def main():
                check_today_means_moscow_not_the_host,
                check_dates_accept_russian_words,
                check_cancel_reports_that_nothing_changed,
+               check_recurring_event_names_its_start_a_series_start,
                check_cancel_of_a_series_needs_a_day_and_resolves_it_itself,
                check_book_reports_the_row_that_was_saved,
                check_book_refuses_a_date_outside_the_window,
