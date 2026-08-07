@@ -14,9 +14,8 @@ captures*.jsonl
 /session.json
 /myt.json
 
-# Рантайм-логи: MYT_TRACE_FILE / MYT_EVENTS тоже перенастраиваются сюда.
+# Рантайм-лог вызовов: MYT_TRACE_FILE умеет положить его сюда.
 calls.jsonl
-events.jsonl
 
 # Собирается на старте из системных CA + приколотого корня.
 ca/bundle.pem
