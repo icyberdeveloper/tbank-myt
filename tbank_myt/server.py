@@ -64,6 +64,11 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "calendar_cancel": ("Отмена встречи", WRITE),
     "parking_places": ("Свободные места на парковке", READ),
     "parking_book": ("Бронь места на парковке", WRITE),
+    # WRITE, а не DESTRUCTIVE — по тому же решению пользователя, что и отмена
+    # встречи: подтверждающего диалога здесь нет нигде. Снятая бронь при этом
+    # необратима на практике — освободившееся место тут же уходит коллегам, —
+    # поэтому тул не выбирает бронь за пользователя, когда их на день больше одной.
+    "parking_cancel": ("Снятие брони парковки", WRITE),
     "office_bookings": ("Мои брони в офисе", READ),
 }
 
@@ -848,14 +853,80 @@ def parking_book(date: str, place_id: int, car_number: str = "", car_model: str 
 
 
 @mcp.tool()
+def parking_cancel(date: str = "", place_id: int = 0) -> str:
+    """Снять свою бронь парковки на день — освобождает место, денег не двигает.
+
+    Пустая дата = сегодня. place_id обычно не нужен: тул сам находит бронь этого
+    дня. Он нужен, только если броней на день несколько — тогда тул перечислит их
+    и НЕ станет выбирать за тебя.
+
+    Сервер отвечает 200 с ПУСТЫМ телом и на успех, и молча, поэтому после
+    удаления тул перечитывает брони и говорит, что действительно исчезло.
+
+    Только парковка: рабочее место, локер и закреплённое место этот тул не
+    трогает, чужую бронь снять нельзя.
+    """
+    try:
+        s = _require_myt()
+        tz, _ = s.tz()
+        day = myt.as_date(date, tz=tz)
+        # Один запрос на всё: он же отдаёт брони и на более поздние дни, поэтому
+        # при промахе по дате есть чем подсказать, не ходя на сервер второй раз.
+        known = s.bookings(day).get("parkingBookings") or []
+        rows = [b for b in known if str(b.get("date")) == day]
+        if not rows:
+            later = sorted({str(b.get("date")) for b in known if str(b.get("date")) > day})
+            # Запрос отдаёт брони НАЧИНАЯ с этого дня, поэтому про более ранние мы
+            # ничего не знаем и не выдаём молчание за их отсутствие.
+            tail = (f" Есть на другие дни: {', '.join(later)}." if later
+                    else f" Начиная с {day} их нет вообще.")
+            return f"На {day} брони парковки нет — снимать нечего.{tail}"
+        if place_id:
+            rows = [b for b in rows if str(b.get("parkingPlaceId")) == str(place_id)]
+            if not rows:
+                return (f"Брони места {place_id} на {day} нет. Есть: " +
+                        "; ".join(f"место {b.get('position')} (place_id={b.get('parkingPlaceId')})"
+                                  for b in known if str(b.get("date")) == day) + ".")
+        elif len(rows) > 1:
+            # Выбор за пользователя тут делать нельзя: лишнее снятое место тут же
+            # уедет коллеге, и вернуть его будет нечем.
+            return (f"На {day} броней парковки несколько — какую снять, не угадываю. " +
+                    "; ".join(f"место {b.get('position')}, этаж {b.get('floorName')}, "
+                              f"{b.get('buildingName')} (place_id={b.get('parkingPlaceId')})"
+                              for b in rows) +
+                    f". Повтори с place_id: parking_cancel('{day}', <place_id>).")
+        b = rows[0]
+        pid = b.get("parkingPlaceId")
+        where = (f"место {b.get('position')} на {day}, этаж {b.get('floorName')}, "
+                 f"{b.get('buildingName')}")
+        s.parking_cancel(pid, day)
+        # Удаление ушло и могло сработать. Всё, что ниже, — попытка узнать, что
+        # стало на сервере; провал этой попытки НЕ означает, что бронь цела.
+        try:
+            still = [x for x in (s.bookings(day).get("parkingBookings") or [])
+                     if str(x.get("date")) == day and str(x.get("parkingPlaceId")) == str(pid)]
+        except Exception as e:
+            return (f"Запрос на снятие брони ({where}) отправлен и принят, но проверить "
+                    f"результат не удалось ({_cut(_redact_value(str(e)), 120)}). Бронь "
+                    f"могла сняться — сначала посмотри office_bookings('{day}'), "
+                    f"не бронируй заново вслепую.")
+        if still:
+            return (f"Сервер ответил 200, но бронь на месте: {where}. НЕ снята — "
+                    f"проверь в приложении MyT.")
+        return f"Бронь снята: {where}. Место снова свободно, его может занять любой."
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
 def office_bookings(date: str = "", max_chars: int = 4000) -> str:
     """Мои брони в офисе: парковка, рабочее место, локеры (MyT, НЕ банк).
 
     Пустая дата = сегодня. Возвращает брони НАЧИНАЯ с этой даты, а не только за
     неё — то есть одного вызова хватает, чтобы увидеть всё окно вперёд.
 
-    Отменить бронь парковки этот MCP не умеет: такого запроса нет, а угадывать
-    метод и путь на живом сервисе нельзя. Отмена — в приложении MyT."""
+    Снять бронь парковки — parking_cancel(date). Рабочее место, локер и
+    закреплённое место снимаются только в приложении MyT."""
     try:
         s = _require_myt()
         tz, _ = s.tz()

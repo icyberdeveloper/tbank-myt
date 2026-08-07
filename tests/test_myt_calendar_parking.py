@@ -422,6 +422,86 @@ def check_cancel_reports_that_nothing_changed():
     print("  отмена: рапорт по перечитанному расписанию, а не по коду 200")
 
 
+def _booking(day, place_id=78984, pos="219"):
+    return {"date": day, "parkingPlaceId": place_id, "position": pos,
+            "floorName": "-2", "buildingName": "Офис, Низкая Башня",
+            "carNumber": "A000AA000", "carModel": "Марка"}
+
+
+def check_parking_cancel_request_matches_capture():
+    """Форма снятия брони — ровно та, что снята с трафика клиента.
+
+    День уходит В ПУТИ, а не в теле, тело пустое, и при этом клиент шлёт
+    Content-Type: application/json — заголовок, описывающий несуществующее тело.
+    Бессмысленно, но повторяется как есть: гадать, что серверу можно не
+    присылать, тут не на чем."""
+    day = today(1)
+    s = with_session(session({
+        ("GET", "all-user-bookings"): [FakeResp(200, {"parkingBookings": [_booking(day)]}),
+                                       FakeResp(200, {"parkingBookings": []})],
+        ("DELETE", "/booking/parking/"): FakeResp(200)}))
+    out = server.parking_cancel(day)
+    dels = [c for c in s._http.calls if c["method"] == "DELETE"]
+    check(len(dels) == 1, f"должен уйти ровно один DELETE, ушло {len(dels)}")
+    url = dels[0]["url"]
+    check(url.endswith(f"/workplacer/api/booking/parking/78984/date/{day}"),
+          f"путь разошёлся с захватом: {url}")
+    check(dels[0]["body"] is None, f"тело должно быть пустым, а не {dels[0]['body']!r}")
+    check(dels[0]["headers"].get("Content-Type") == "application/json",
+          f"клиент шлёт Content-Type даже без тела: {dels[0]['headers'].get('Content-Type')!r}")
+    check(out.startswith("Бронь снята"), f"бронь исчезла — можно сказать «снята»: {out}")
+    print("  снятие брони: путь, пустое тело и заголовок — как в захвате")
+
+
+def check_parking_cancel_does_not_believe_an_empty_200():
+    """200 с пустым телом ничего не значит: если бронь на месте — так и сказать."""
+    day = today(1)
+    rows = {"parkingBookings": [_booking(day)]}
+    with_session(session({
+        ("GET", "all-user-bookings"): FakeResp(200, rows),   # и до, и ПОСЛЕ — бронь цела
+        ("DELETE", "/booking/parking/"): FakeResp(200)}))
+    out = server.parking_cancel(day)
+    check("НЕ снята" in out, f"сервер сказал 200, а бронь цела — это не успех: {out}")
+    check("снята: " not in out.lower(), f"нельзя рапортовать снятие: {out}")
+    print("  снятие брони: пустой 200 при уцелевшей брони не выдаётся за успех")
+
+
+def check_parking_cancel_asks_which_when_a_day_has_several():
+    """Две брони на день — тул перечисляет их и НЕ выбирает сам.
+
+    Освободившееся место немедленно уходит коллегам, вернуть его нечем, поэтому
+    цена угадывания здесь несимметрична цене лишнего вопроса."""
+    day = today(1)
+    rows = {"parkingBookings": [_booking(day), _booking(day, 88255, "220")]}
+    s = with_session(session({("GET", "all-user-bookings"): FakeResp(200, rows)}))
+    out = server.parking_cancel(day)
+    check(not any(c["method"] == "DELETE" for c in s._http.calls),
+          "пока не выбрали бронь, DELETE уходить не должен")
+    check("78984" in out and "88255" in out, f"надо показать обе с place_id: {out}")
+    print("  снятие брони: при нескольких бронях выбор не угадывается")
+
+
+def check_parking_cancel_says_when_there_is_nothing_to_cancel():
+    """Нет брони на день — это ответ, а не ошибка; и подсказка, где она есть."""
+    day, other = today(1), today(3)
+    s = with_session(session({
+        ("GET", "all-user-bookings"): FakeResp(200, {"parkingBookings": [_booking(other)]})}))
+    out = server.parking_cancel(day)
+    check(not any(c["method"] == "DELETE" for c in s._http.calls),
+          "снимать нечего — DELETE уходить не должен")
+    check("снимать нечего" in out and other in out,
+          f"надо сказать, что брони нет, и где она есть: {out}")
+
+    # И промах по place_id тоже не приводит к удалению чего попало.
+    s = with_session(session({
+        ("GET", "all-user-bookings"): FakeResp(200, {"parkingBookings": [_booking(day)]})}))
+    out = server.parking_cancel(day, 99999)
+    check(not any(c["method"] == "DELETE" for c in s._http.calls),
+          "место не то — DELETE уходить не должен")
+    check("78984" in out, f"надо показать, какая бронь на самом деле есть: {out}")
+    print("  снятие брони: нечего снять и не то место — оба случая без DELETE")
+
+
 def check_recurring_event_names_its_start_a_series_start():
     """У серии ключ называется «начало_серии» — потому что это оно и есть.
 
@@ -1147,6 +1227,10 @@ def main():
                check_today_means_moscow_not_the_host,
                check_dates_accept_russian_words,
                check_cancel_reports_that_nothing_changed,
+               check_parking_cancel_request_matches_capture,
+               check_parking_cancel_does_not_believe_an_empty_200,
+               check_parking_cancel_asks_which_when_a_day_has_several,
+               check_parking_cancel_says_when_there_is_nothing_to_cancel,
                check_recurring_event_names_its_start_a_series_start,
                check_cancel_of_a_series_needs_a_day_and_resolves_it_itself,
                check_book_reports_the_row_that_was_saved,
