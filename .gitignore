@@ -18,4 +18,8 @@ captures*.jsonl
 calls.jsonl
 
 # Собирается на старте из системных CA + приколотого корня.
-ca/bundle.pem
+tbank_myt/ca/bundle.pem
+
+# Артефакты сборки.
+build/
+dist/

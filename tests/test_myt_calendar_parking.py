@@ -38,8 +38,8 @@ for _var, _name in (("MYT_TRACE_FILE", "calls.jsonl"), ("MYT_EVENTS", "events.js
                     ("MYT_SESSION", "session.json")):
     os.environ.setdefault(_var, os.path.join(_scratch, _name))
 
-from src import myt, server  # noqa: E402
-from src.errors import MytApiError  # noqa: E402
+from tbank_myt import myt, server  # noqa: E402
+from tbank_myt.errors import MytApiError  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURE = json.load(open(os.path.join(HERE, "fixtures", "myt.json"), encoding="utf-8"))
@@ -857,7 +857,7 @@ def check_corporate_login_does_not_reach_the_trace():
     дословно. Проверяем то, что записано, а не то, что объявлено."""
     import importlib
     import tempfile
-    from src import trace
+    from tbank_myt import trace
 
     tmp = tempfile.mkdtemp()
     path = os.path.join(tmp, "calls.jsonl")
