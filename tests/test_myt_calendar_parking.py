@@ -1032,6 +1032,36 @@ def check_every_cut_announces_itself():
     print("  обрезания: итог, способ достать остальное и пометка среза — на всех четырёх")
 
 
+def check_a_big_roster_is_not_lost_silently():
+    """У большой встречи список участников резался в тупик: способа достать
+    отброшенных не было — у тула был один аргумент."""
+    people = [{"id": i, "participantId": 10000 + i, "email": f"user{i}@example.com",
+               "fullName": f"Сотрудник {i}", "legalPosition": "Должность",
+               "resourceUnit": "Подразделение", "isOwner": i == 0,
+               "responseType": "Accept"} for i in range(120)]
+    big = dict(fx("detail")["res_body"], participants=people)
+    aid = "00000000-0000-4000-8000-000000000012"
+
+    with_session(session({("GET", "/api/Appointment/"): FakeResp(200, big)}))
+    out = server.calendar_event(aid)
+    check("ПОКАЗАНО" in out, f"срез обязан быть назван: {out[:120]}")
+    check("max_chars=0" in out, f"и должен назвать, чем его снять: {out[:200]}")
+    payload = json.loads(out.split("\n", 1)[1])
+    check(payload["участников"] == 120,
+          f"счётчик обязан говорить правду даже когда список урезан: {payload['участников']}")
+    check(len(payload["участники"]) < 120, "иначе тест ничего не проверяет")
+
+    # А со снятым пределом — все на месте, и никакой пометки.
+    with_session(session({("GET", "/api/Appointment/"): FakeResp(200, big)}))
+    full = server.calendar_event(aid, max_chars=0)
+    check("ПОКАЗАНО" not in full and "ОБРЕЗАН" not in full,
+          f"при max_chars=0 резать нечего: {full[:120]}")
+    payload = json.loads(full)
+    check(len(payload["участники"]) == 120,
+          f"должны быть все 120: {len(payload['участники'])}")
+    print("  детали встречи: срез назван, снимается max_chars=0, счётчик не врёт")
+
+
 def check_no_session_does_not_pretend():
     server._myt_session = None
     saved, server._MYT_FILE = server._MYT_FILE, os.path.join(HERE, "no-such-myt.json")
@@ -1105,6 +1135,7 @@ def main():
                check_refresh_tool_does_the_capture_exchange,
                check_status_verifies_instead_of_doing_arithmetic,
                check_every_cut_announces_itself,
+               check_a_big_roster_is_not_lost_silently,
                check_no_session_does_not_pretend,
                check_fixture_still_matches_capture):
         fn()

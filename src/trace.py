@@ -122,6 +122,10 @@ _RE_LONG_ID = re.compile(r"\d{4,}")
 # workplacer принимает кириллицу и возвращает транслит.
 _RE_PLATE = re.compile(r"\b(?:[АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}"
                        r"|[ABEKMHOPCTYX]\d{3}[ABEKMHOPCTYX]{2})\d{2,3}\b")
+# Заметь асимметрию: в ОТВЕТЕ тула номер печатается намеренно (пользователь обязан
+# видеть, на какую машину бронь), а здесь маскируется. Это не противоречие, а разная
+# цена ошибки: ответ читает владелец в своей сессии, а calls.jsonl лежит на диске,
+# переживает сессию и задуман пригодным к тому, чтобы им поделиться.
 
 # One id per server process. An MCP server is started per agent session, so this is
 # the closest thing to "one agent's run" that exists without inventing a protocol.
