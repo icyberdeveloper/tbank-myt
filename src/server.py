@@ -141,7 +141,11 @@ def _err(e):
         return _cut(_redact_value(str(msg)), 300)
 
     if isinstance(e, MytSessionExpired):
-        return (f"MYT SESSION EXPIRED: сессия мертва, обмен токена уже не поможет. "
+        # Сюда доходит только то, что пережило попытку обмена внутри _call, либо
+        # провал самого обмена. Раньше этот вердикт печатался на ЛЮБОЙ 401/403,
+        # включая отказ в правах, — и утверждал, что обмен не поможет, ни разу его
+        # не попробовав.
+        return (f"MYT SESSION EXPIRED: обмен токена не помог, сессия мертва. "
                 f"Нужен полный вход: .venv/bin/python login_cli.py <логин>. "
                 f"{safe(e.message)}")
     if isinstance(e, MytApiError):
@@ -354,6 +358,11 @@ def _require_myt():
 # всех 12 запросах приложения), поэтому значение не меняем; но раз это ПОТОЛОК,
 # вывод обязан отличать «десять мест свободно» от «показаны первые десять».
 _PARK_COUNT = 10
+
+
+def _shift_day(day: str, delta: int) -> str:
+    """Соседние сутки. Нужны там, где день пользователя и день kairos расходятся."""
+    return (datetime.fromisoformat(day) + timedelta(days=delta)).strftime("%Y-%m-%d")
 
 
 def _appt_row(a: dict, tz) -> str:
@@ -584,48 +593,78 @@ def calendar_respond(appointment_id: str, response: str, comment: str = "") -> s
 
 
 @mcp.tool()
-def calendar_cancel(appointment_id: str, occurrence_start: str = "") -> str:
+def calendar_cancel(appointment_id: str, occurrence: str = "") -> str:
     """Отменить встречу — НЕОБРАТИМО, уведомление уйдёт всем участникам.
 
-    Работает только у организатора. Спроси у пользователя подтверждение с
-    названием и временем встречи, прежде чем вызывать.
+    Работает только у организатора. Спроси подтверждение с названием и временем,
+    прежде чем вызывать.
 
-    occurrence_start — начало ИМЕННО того вхождения, которое отменяем, в том виде,
-    как его отдаёт kairos: UTC со смещением, 2026-08-05T12:00:00+00:00. Это КЛЮЧ
-    вхождения, а не отображение, поэтому переводить его в местное время нельзя —
-    calendar_schedule() показывает время в поясе сотрудника, а сюда нужен исходный
-    момент. Для разовой встречи можно не передавать — возьмётся из неё самой.
+    occurrence — КАКОЕ вхождение отменяем. Достаточно даты: «2026-08-05», «завтра».
+    Тул сам найдёт в этом дне нужную встречу и возьмёт её исходный момент — то есть
+    ключ, который требует kairos. Для разовой встречи можно не передавать вовсе.
+    Точный момент из kairos (2026-08-05T12:00:00+00:00) тоже принимается, если он у
+    тебя откуда-то есть.
 
-    Для ПОВТОРЯЮЩЕЙСЯ встречи параметр обязателен: отмена по началу серии вернёт
-    200 и не отменит ничего. 200 здесь вообще не значит «отменено», поэтому тул
-    после отмены перечитывает день и печатает, что вышло на самом деле."""
+    Для ПОВТОРЯЮЩЕЙСЯ встречи дата обязательна: сама встреча знает только начало
+    ВСЕЙ серии, а отмена по нему возвращает 200 и не отменяет ничего. 200 здесь
+    вообще ничего не доказывает, поэтому тул после отмены перечитывает день и
+    печатает, что вышло на самом деле — верь этой строке, а не факту вызова."""
     try:
         s = _require_myt()
+        tz, _ = s.tz()
         d = s.appointment(appointment_id) or {}
         title = _flat(d.get("title") or "(без названия)")
-        when = occurrence_start.strip()
-        if not when:
-            if d.get("isRecurrent"):
+        raw = occurrence.strip()
+
+        # Ключ вхождения и день ДЛЯ ЗАПРОСА к kairos — разные вещи, и раньше они
+        # были склеены: day = when[:10] отрезал дату от UTC-момента и печатал её
+        # человеку как его день. У сотрудника в +10 это разные сутки.
+        when = ""
+        if "T" in raw:                       # уже момент kairos — берём как есть
+            when = raw
+            qday = raw[:10]
+        else:
+            if raw:
+                qday = myt.as_date(raw, tz=tz)
+            elif d.get("isRecurrent"):
                 return (f"«{title}» — повторяющаяся встреча ({d.get('recurrencePattern')}). "
-                        f"Нужен occurrence_start конкретного вхождения из "
-                        f"calendar_schedule(): у самой встречи start={d.get('start')}, "
-                        f"это начало ВСЕЙ серии, и отмена по нему в захвате ничего не "
-                        f"убрала.")
-            when = str(d.get("start") or "")
+                        f"Назови ДЕНЬ вхождения: calendar_cancel('{appointment_id}', "
+                        f"'2026-08-05') или 'завтра'. Начало серии для отмены не годится "
+                        f"— по нему kairos отвечает 200 и не отменяет ничего.")
+            else:
+                start = str(d.get("start") or "")
+                if not start:
+                    return (f"У встречи {appointment_id} нет времени начала — назови день "
+                            f"вхождения вторым аргументом.")
+                qday = start[:10]
+            # Ищем вхождение в дне. Запрос к kairos идёт по ЕГО суткам (UTC), а
+            # пользователь называет свои: у краёв это соседний день, поэтому
+            # смотрим и соседей — но только если в самом дне не нашлось.
+            for probe in (qday, _shift_day(qday, -1), _shift_day(qday, +1)):
+                hits = [a for a in s.day_appointments(probe)
+                        if a.get("id") == appointment_id]
+                if hits:
+                    when, qday = str(hits[0].get("start") or ""), probe
+                    break
             if not when:
-                return f"У встречи {appointment_id} нет start — передай occurrence_start вручную."
+                return (f"На {qday} встречи «{title}» нет — проверь день через "
+                        f"calendar_schedule('{qday}').")
+
+        local = myt.to_local(when, tz)
+        human = f"{local:%Y-%m-%d %H:%M}" if local else when
         s.cancel(appointment_id, when)
-        day = when[:10]
         try:
-            still = [a for a in s.day_appointments(day) if a.get("id") == appointment_id]
+            still = [a for a in s.day_appointments(qday) if a.get("id") == appointment_id]
         except Exception:
-            return (f"Отмена отправлена: «{title}» {when}. Перечитать расписание не "
-                    f"удалось — проверь calendar_schedule('{day}').")
+            return (f"Отмена отправлена: «{title}», {human} ({myt.tz_label(tz)}). "
+                    f"Перечитать расписание не удалось — проверь "
+                    f"calendar_schedule('{qday}').")
         if still:
-            return (f"Сервер ответил 200, но «{title}» всё ещё в расписании на {day} "
-                    f"({still[0].get('start')}). Отмена НЕ применилась — проверь в "
-                    f"приложении; для серии нужен occurrence_start нужного вхождения.")
-        return f"Отменено: «{title}» {when}. В расписании на {day} её больше нет."
+            return (f"Сервер ответил 200, но «{title}» всё ещё в расписании: "
+                    f"{human} ({myt.tz_label(tz)}). Отмена НЕ применилась — проверь в "
+                    f"приложении MyT.")
+        return (f"Отменено: «{title}», {human} ({myt.tz_label(tz)}). "
+                f"В расписании этого дня её больше нет.")
     except Exception as e:
         return _err(e)
 
@@ -725,6 +764,14 @@ def parking_book(date: str, place_id: int, car_number: str = "", car_model: str 
                     "(и car_model) явно.")
         if not bid:
             return "Не знаю здание: передай building_id из parking_places()."
+        # Нижняя граница. Раньше проверялся только верх, и на вчерашнюю дату тул
+        # отправлял POST, а потом винил место: «НЕ забронировано, попробуй другое» —
+        # отправляя агента искать несуществующую проблему вместо очевидной.
+        today_local = myt.today_in(tz).isoformat()
+        if day < today_local:
+            return (f"{day} уже прошло (сегодня {today_local} по твоему поясу) — "
+                    f"парковку задним числом не бронируют. Ближайшее, что можно: "
+                    f"parking_places('{today_local}').")
         cfg = s.booking_settings()
         horizon = int(cfg.get("availableParkingPeriodDays") or 0)
         if horizon:

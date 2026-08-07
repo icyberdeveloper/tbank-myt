@@ -358,7 +358,12 @@ class MytSession:
             data = self._token_call({"grantType": "refresh_token",
                                      "refreshToken": self.refresh_token})
         except MytApiError as e:
-            if e.result_code.startswith("http_4") or "grant" in e.result_code:
+            # Хост авторизации всегда отвечает телом {"error":{code,message}}, так
+            # что _token_call поднимает код ИЗ ТЕЛА, а не http_4xx — прежняя проверка
+            # на "http_4" была недостижима, и мёртвый refresh-токен доезжал до агента
+            # обычной ошибкой API вместо MYT SESSION EXPIRED. Сетевой сбой сессией не
+            # считаем: он ничего не говорит о токене.
+            if e.result_code != "NETWORK":
                 raise MytSessionExpired(e.result_code, e.message)
             raise
         self._adopt(data)
@@ -419,7 +424,8 @@ class MytSession:
             "X-Auth-Provider": "twork",
         }
 
-    def _call(self, method: str, url: str, *, params=None, body=None, timeout: int = 30):
+    def _call(self, method: str, url: str, *, params=None, body=None,
+              timeout: int = 30, retry_auth: bool = True):
         self.ensure_fresh()
         headers = self._api_headers()
         if body is not None:
@@ -429,8 +435,24 @@ class MytSession:
                                    headers=headers, timeout=timeout)
         except requests.exceptions.RequestException as e:
             raise MytApiError("NETWORK", f"{type(e).__name__}: {e}")
-        if r.status_code in (401, 403):
-            raise MytSessionExpired(f"http_{r.status_code}", "Токен MyT отклонён.")
+
+        # 401 и 403 — РАЗНЫЕ вещи, и раньше обе объявлялись мёртвой сессией.
+        # 403 от kairos приходит на отмену чужой встречи: сессия жива, прав нет, и
+        # человека отправляли тратить пароль и SMS на ошибку доступа. Текст сервиса
+        # при этом выбрасывался — в файле, где строкой ниже написано, что подменять
+        # его своей формулировкой значит терять причину.
+        if r.status_code == 403:
+            raise MytApiError("http_403", r.text.strip()[:300] or
+                              "Доступ запрещён (403). Сессия жива — не хватает прав.")
+        if r.status_code == 401:
+            # Токен мог просто протухнуть раньше, чем мы ждали. 401 приходит ДО
+            # бизнес-логики, поэтому повтор безопасен и для записи: сервер её не
+            # видел. Одна попытка, и только если и она не прошла — сессия мертва.
+            if not retry_auth:
+                raise MytSessionExpired("http_401", "Токен MyT отклонён повторно.")
+            self.refresh()
+            return self._call(method, url, params=params, body=body,
+                              timeout=timeout, retry_auth=False)
         if r.status_code >= 400:
             # Kairos отвечает text/plain по-русски («Ответ на встречу можно дать раз
             # в 5 секунд»), workplacer — JSON. Отдаём как есть: текст осмысленный,

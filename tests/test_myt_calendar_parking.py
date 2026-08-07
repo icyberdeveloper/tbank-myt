@@ -254,19 +254,64 @@ def check_answer_does_not_swallow_other_400():
     print("  прочие 400 отдаются как есть, без повтора")
 
 
-def check_401_says_which_session_died():
-    s = session({("GET", "/api/Appointment/short"): FakeResp(401, text="")})
-    try:
-        s.day_appointments("2026-08-05")
-        failures.append("401 обязан подниматься как MytSessionExpired")
-        return
-    except myt.MytSessionExpired as ex:
-        out = server._err(ex)
-    check("MYT SESSION EXPIRED" in out, f"ответ должен называть корпоративную сессию: {out}")
-    check("refresh_session()" not in out,
-          "нельзя отправлять в refresh_session(): он чинит банковскую сессию, не эту")
-    check("login_cli.py" in out, f"должен быть назван способ починки: {out}")
-    print("  401: MYT SESSION EXPIRED и путь починки, без совета про банковский refresh")
+def check_401_tries_the_exchange_before_calling_the_session_dead():
+    """401 — не приговор: токен мог протухнуть раньше, чем мы ждали.
+
+    Раньше любой 401/403 сразу давал «сессия мертва, обмен уже не поможет» — при
+    том что обмен ни разу не пробовался. 401 приходит ДО бизнес-логики, поэтому
+    один повтор безопасен даже для записи: сервер её не видел."""
+    calls = []
+    s = with_session(session({
+        ("GET", "/api/Appointment/short"): [FakeResp(401, text=""),          # первый — отказ
+                                            resp_of("schedule")],            # после обмена — данные
+        ("POST", "/v3/auth/token"): FakeResp(200, {
+            "accessToken": "свежий", "refreshToken": "r", "expiresIn": 3600,
+            "tokenType": "Bearer"}),
+    }))
+    out = server.calendar_schedule("2026-08-05")
+    check("SESSION EXPIRED" not in out, f"обмен прошёл — сессия жива: {out[:90]}")
+    check("Встречи" in out, f"после обмена запрос обязан быть повторён: {out[:90]}")
+    check(any("/v3/auth/token" in c["url"] for c in s._http.calls), "обмен должен состояться")
+    check(s.access_token == "свежий", "после обмена должен стоять новый токен")
+
+    # А если и обмен не прошёл — вот теперь сессия действительно мертва.
+    s2 = with_session(session({
+        ("GET", "/api/Appointment/short"): FakeResp(401, text=""),
+        ("POST", "/v3/auth/token"): FakeResp(400, {"error": {"code": "invalid_grant",
+                                                             "message": "no"}}),
+    }))
+    out = server.calendar_schedule("2026-08-05")
+    check("MYT SESSION EXPIRED" in out, f"мёртвый refresh — это SESSION EXPIRED: {out[:90]}")
+    check("обмен токена не помог" in out,
+          f"вердикт должен опираться на попытку, а не заявляться заранее: {out[:110]}")
+    check("login_cli.py" in out, f"надо назвать способ починки: {out[:110]}")
+    print("  401: сначала обмен, и только потом приговор")
+
+
+def check_403_is_a_permission_error_not_a_dead_session():
+    """403 от kairos — «ты не организатор», а не «сессия умерла».
+
+    Прежний код сваливал 403 в MytSessionExpired и отправлял человека тратить
+    пароль и SMS на ошибку прав, выбросив текст сервиса."""
+    aid = "00000000-0000-4000-8000-000000000001"
+    s = with_session(session({
+        ("GET", f"/api/Appointment/{aid}"): FakeResp(200, {
+            "id": aid, "title": "Встреча", "start": "2026-08-07T12:00:00+00:00",
+            "isRecurrent": False}),
+        ("GET", "/api/Appointment/short"): FakeResp(200, {"appointments": [
+            {"id": aid, "start": "2026-08-07T12:00:00+00:00",
+             "end": "2026-08-07T13:00:00+00:00", "title": "Встреча",
+             "currentUserMeetingResponseType": "Accept", "isEnded": False}]}),
+        ("PUT", "/cancel"): FakeResp(403, text="Отменить встречу может только организатор"),
+    }))
+    out = server.calendar_cancel(aid, "2026-08-07")
+    check("SESSION EXPIRED" not in out, f"403 — это не мёртвая сессия: {out[:110]}")
+    check("только организатор" in out,
+          f"текст сервиса обязан долететь целиком: {out[:130]}")
+    check("login_cli" not in out, f"пароль тут ни при чём: {out[:110]}")
+    check(not any("/v3/auth/token" in c["url"] for c in s._http.calls),
+          "на 403 обмен токена бессмыслен и не должен происходить")
+    print("  403: отказ в правах со словами сервиса, без похода за паролем")
 
 
 def check_html_agenda_becomes_text():
@@ -366,20 +411,49 @@ def check_cancel_reports_that_nothing_changed():
     print("  отмена: рапорт по перечитанному расписанию, а не по коду 200")
 
 
-def check_cancel_refuses_a_series_without_the_occurrence():
+def check_cancel_of_a_series_needs_a_day_and_resolves_it_itself():
+    """Для серии нужен ДЕНЬ — и по нему тул сам находит момент, который ждёт kairos.
+
+    Раньше он требовал occurrence_start в виде сырого момента kairos, а получить
+    его было неоткуда: расписание печатает местное время. Просить у агента ключ,
+    который ни один читающий тул не выдаёт, — это тупик, а не защита."""
     aid = "00000000-0000-4000-8000-000000000008"
-    s = with_session(session({
-        ("GET", f"/api/Appointment/{aid}"): FakeResp(200, {
-            "id": aid, "title": "Встреча", "start": "2020-12-07T12:00:00+00:00",
-            "isRecurrent": True, "recurrencePattern": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"}),
-        ("PUT", "/cancel"): FakeResp(200),
-    }))
+    master = {"id": aid, "title": "Встреча", "start": "2020-12-07T12:00:00+00:00",
+              "isRecurrent": True, "recurrencePattern": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"}
+    s = with_session(session({("GET", f"/api/Appointment/{aid}"): FakeResp(200, master),
+                              ("PUT", "/cancel"): FakeResp(200)}))
     out = server.calendar_cancel(aid)
-    check("occurrence_start" in out, f"нужно попросить конкретное вхождение: {out}")
-    check("2020" in out, f"надо показать, что start — это начало серии: {out}")
+    check("ДЕНЬ" in out or "день" in out, f"надо попросить именно день: {out[:120]}")
+    check("2020" not in out, f"начало серии агенту показывать незачем: {out[:120]}")
     check(not any(c["method"] == "PUT" for c in s._http.calls),
-          "отмена серии по мастеру не должна уходить на сервер вообще")
-    print("  отмена серии без occurrence_start: отказ, запрос не уходит")
+          "без дня запрос на отмену уходить не должен")
+
+    # А с днём — тул сам находит вхождение и отменяет ИМЕННО его.
+    occ = "2026-08-05T12:00:00+00:00"
+    day_rows = {"appointments": [{"id": aid, "start": occ, "end": "2026-08-05T15:00:00+00:00",
+                                  "title": "Встреча",
+                                  "currentUserMeetingResponseType": "Organizer",
+                                  "isEnded": False}]}
+    s = with_session(session({
+        ("GET", f"/api/Appointment/{aid}"): FakeResp(200, master),
+        ("PUT", "/cancel"): FakeResp(200),
+        ("GET", "/api/Appointment/short"): [FakeResp(200, day_rows),
+                                            FakeResp(200, {"appointments": []})],
+    }))
+    out = server.calendar_cancel(aid, "2026-08-05")
+    sent = next(c for c in s._http.calls if c["method"] == "PUT")["params"]["DateTime"]
+    check(sent == occ, f"отменяется вхождение, а не мастер серии: {sent}")
+    check(out.startswith("Отменено"), f"вхождение исчезло — можно сказать «отменено»: {out[:110]}")
+
+    # День, в котором встречи нет, — отказ до всякой отмены.
+    s = with_session(session({
+        ("GET", f"/api/Appointment/{aid}"): FakeResp(200, master),
+        ("GET", "/api/Appointment/short"): FakeResp(200, {"appointments": []}),
+    }))
+    out = server.calendar_cancel(aid, "2026-08-05")
+    check("нет" in out and "calendar_schedule" in out,
+          f"надо сказать, что в этом дне встречи нет: {out[:120]}")
+    print("  отмена серии: по дню, момент находится сам, пустой день — отказ")
 
 
 def check_book_reports_the_row_that_was_saved():
@@ -437,7 +511,16 @@ def check_book_refuses_a_date_outside_the_window():
     check(today(horizon) in out, f"надо назвать последний доступный день: {out}")
     check(not any(c["method"] == "POST" for c in s._http.calls),
           "запрос за пределами окна не должен уходить на сервер")
-    print(f"  бронь: дальше {horizon} дней — отказ с последней доступной датой")
+    # Вчерашняя дата — отказ до запроса, и вина не на месте.
+    s = with_session(session({("GET", "/parking/last"): resp_of("parking_last"),
+                              ("GET", "/booking-front-settings"): resp_of("front_settings"),
+                              ("POST", "/booking/parking/"): FakeResp(200)}))
+    out = server.parking_book(today(-1), 56239)
+    check("прошло" in out, f"прошедшая дата должна называться прошедшей: {out[:110]}")
+    check("НЕ забронировано" not in out, f"место тут ни при чём: {out[:110]}")
+    check(not any(c["method"] == "POST" for c in s._http.calls),
+          "на прошедшую дату запрос слать незачем")
+    print(f"  бронь: дальше {horizon} дней и раньше сегодня — отказ до запроса")
 
 
 def check_schedule_caps_the_range_and_says_so():
@@ -603,19 +686,27 @@ def check_meeting_times_are_converted_to_the_employee_timezone():
     check("17:00–18:00" in out, f"для сотрудника в +05:00 это 17:00: {out}")
     check("UTC+5" in out.splitlines()[0], f"подпись пояса должна следовать за поясом: {out}")
 
-    # Ключ вхождения для отмены остаётся исходным UTC, а не местным временем.
+    # В DateTime уходит исходный момент kairos, а НЕ то местное время, которое
+    # видел пользователь. Отменяем по дате — момент тул обязан найти сам.
     aid = "00000000-0000-4000-8000-000000000001"
+    day_rows = {"appointments": [{"id": aid, "start": "2026-08-07T12:00:00+00:00",
+                                  "end": "2026-08-07T13:00:00+00:00", "title": "Встреча",
+                                  "currentUserMeetingResponseType": "Organizer",
+                                  "isEnded": False}]}
     s = with_session(session({
         ("GET", f"/api/Appointment/{aid}"): FakeResp(200, {
             "id": aid, "title": "Встреча", "start": "2026-08-07T12:00:00+00:00",
             "isRecurrent": False}),
         ("PUT", "/cancel"): FakeResp(200),
-        ("GET", "/api/Appointment/short"): FakeResp(200, {"appointments": []}),
-    }))
-    server.calendar_cancel(aid)
+        # день сначала содержит встречу (для поиска), потом пуст (для проверки)
+        ("GET", "/api/Appointment/short"): [FakeResp(200, day_rows),
+                                            FakeResp(200, {"appointments": []})],
+    }, tz=myt.parse_tz("+05:00")))
+    out = server.calendar_cancel(aid, "2026-08-07")
     sent = next(c for c in s._http.calls if c["method"] == "PUT")["params"]["DateTime"]
     check(sent == "2026-08-07T12:00:00+00:00",
           f"в DateTime уходит момент из kairos, не местное время: {sent}")
+    check("17:00" in out, f"а человеку время показывается в его поясе: {out[:110]}")
     print("  время: UTC → пояс сотрудника, подпись в шапке, ключ отмены не тронут")
 
 
@@ -895,12 +986,13 @@ def main():
                check_answer_aliases_are_exact,
                check_answer_retries_once_on_throttle,
                check_answer_does_not_swallow_other_400,
-               check_401_says_which_session_died,
+               check_401_tries_the_exchange_before_calling_the_session_dead,
+               check_403_is_a_permission_error_not_a_dead_session,
                check_html_agenda_becomes_text,
                check_today_means_moscow_not_the_host,
                check_dates_accept_russian_words,
                check_cancel_reports_that_nothing_changed,
-               check_cancel_refuses_a_series_without_the_occurrence,
+               check_cancel_of_a_series_needs_a_day_and_resolves_it_itself,
                check_book_reports_the_row_that_was_saved,
                check_book_refuses_a_date_outside_the_window,
                check_schedule_caps_the_range_and_says_so,
