@@ -56,8 +56,8 @@ SYSTEM_CA_CANDIDATES = [
     "/etc/ssl/ca-bundle.pem",
     "/etc/ssl/cert.pem",
 ]
-ROOTS_DIR = os.path.join(_HERE, "..", "ca", "roots")
-BUNDLE = os.path.join(_HERE, "..", "ca", "bundle.pem")
+ROOTS_DIR = os.path.join(_HERE, "ca", "roots")
+BUNDLE = os.path.join(_HERE, "ca", "bundle.pem")
 
 # Roots committed to this repo, pinned by SHA-256 of their DER. A file whose
 # fingerprint does not match is NOT trusted — that is the whole point of shipping

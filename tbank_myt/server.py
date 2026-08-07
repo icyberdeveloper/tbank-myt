@@ -7,7 +7,7 @@
 Докстринги тулов — и есть справка для агента; отдельного списка тулов нет, чтобы
 ему нечего было рассинхронизировать.
 
-Запуск: python -m src.server
+Запуск: python -m tbank_myt.server
 """
 from __future__ import annotations
 
@@ -154,7 +154,7 @@ def _err(e):
         # включая отказ в правах, — и утверждал, что обмен не поможет, ни разу его
         # не попробовав.
         return (f"MYT SESSION EXPIRED: обмен токена не помог, сессия мертва. "
-                f"Нужен полный вход: .venv/bin/python login_cli.py <логин>. "
+                f"Нужен полный вход: tbank-myt-login <логин> (или .venv/bin/python login_cli.py <логин> из клона). "
                 f"{safe(e.message)}")
     if isinstance(e, MytApiError):
         return f"API error ({e.result_code}): {safe(e.message)}"
@@ -353,7 +353,7 @@ def _require_myt():
     if not _myt_session or not _myt_session.alive:
         raise myt.MytSessionExpired("NO_MYT_SESSION",
             "Корпоративной сессии нет. Логин делается ВНЕ агента: "
-            ".venv/bin/python login_cli.py <логин>.")
+            "tbank-myt-login <логин> (или .venv/bin/python login_cli.py <логин> из клона).")
     return _myt_session
 
 
@@ -396,7 +396,8 @@ def myt_status() -> str:
     скажет — молча «успешно» не вернёт.
 
     Чего не может ни один тул — полного перелогина: он требует пароля и SMS и живёт
-    в `.venv/bin/python login_cli.py <логин>`. Если сессия действительно
+    в `tbank-myt-login <логин>` (в клоне — `.venv/bin/python login_cli.py`).
+    Если сессия действительно
     мертва, ответ так и скажет; предлагать пользователю передать пароль не надо.
 
     MyT — рабочее приложение Т-Банка. Если у тебя подключён ещё и банковский MCP:
@@ -447,7 +448,7 @@ def myt_refresh_session() -> str:
     Поэтому повторный вызов ничего не сжигает — звать можно свободно.
 
     Если refresh-токен мёртв — MYT SESSION EXPIRED. Дальше только полный перелогин
-    (`.venv/bin/python login_cli.py <логин>`), он требует пароля и SMS, и ни
+    (`tbank-myt-login <логин>`), он требует пароля и SMS, и ни
     один тул его не заменит. Пароль у пользователя не спрашивай."""
     try:
         s = _require_myt()

@@ -16,10 +16,16 @@ dependencies = [
 ]
 
 [project.scripts]
-tbank-myt-mcp = "src.server:main"
+tbank-myt-mcp = "tbank_myt.server:main"
+# Вход ставится вместе с пакетом: на него ссылается каждый ответ про мёртвую сессию.
+tbank-myt-login = "tbank_myt.login:main"
 
 [tool.setuptools]
-packages = ["src", "ca.roots"]
+# Имя пакета — tbank_myt, а не src. Соседний банковский MCP тоже ставит «src», и в
+# одном venv они затирают друг друга по файлу: проверено — остаётся один каталог со
+# смесью обоих, и MyT начинает импортировать чужой server.py. Приколотый корень
+# лежит ВНУТРИ пакета по той же причине: общего каталога «ca» на двоих быть не должно.
+packages = ["tbank_myt"]
 
 [tool.setuptools.package-data]
-"ca.roots" = ["*.pem"]
+tbank_myt = ["ca/roots/*.pem"]

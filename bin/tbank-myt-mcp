@@ -10,4 +10,4 @@ if [ ! -x "$PY" ]; then
   "$DIR/.venv/bin/pip" install -q -e "$DIR" >&2
 fi
 cd "$DIR"
-exec "$PY" -m src.server
+exec "$PY" -m tbank_myt.server
